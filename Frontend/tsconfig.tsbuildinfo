@@ -1,0 +1,1 @@
+{"root":["./eslint.config.js","./vite.config.ts","./dist/assets/index-qvdv7ch3.js","./src/app.tsx","./src/declarations.d.ts","./src/main.tsx","./src/vite-env.d.ts","./src/components/drawingcanvas.tsx","./src/components/handoverlay.tsx","./src/lib/utils.ts","./src/pages/canvaspage.tsx","./src/pages/landingpage.tsx"],"version":"6.0.3"}

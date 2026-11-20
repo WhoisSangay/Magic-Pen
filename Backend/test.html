@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Hand Gesture Recognition Client</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f0f2f5;
+            text-align: center;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            padding: 20px;
+        }
+
+        h1 {
+            color: #1a73e8;
+            margin-top: 0;
+        }
+
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            max-width: 640px;
+            margin: 0 auto;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #000;
+        }
+
+        video,
+        canvas {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        .prediction {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e8f0fe;
+            border-radius: 12px;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #1a73e8;
+        }
+
+        .status {
+            margin-top: 10px;
+            font-size: 0.9rem;
+            color: #5f6368;
+        }
+
+        button {
+            margin-top: 15px;
+            padding: 8px 16px;
+            background: #1a73e8;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+
+        button:hover {
+            background: #0d5bbd;
+        }
+
+        .error {
+            color: #d93025;
+        }
+
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .swap-label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>✋ Hand Gesture Recognition</h1>
+        <div class="video-wrapper">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="overlay" width="640" height="480"></canvas>
+        </div>
+        <div class="prediction" id="prediction">Waiting for gesture...</div>
+        <div class="controls">
+            <label class="swap-label">
+                <input type="checkbox" id="swapHands" checked> Swap Left/Right (default corrected)
+            </label>
+            <button id="toggleCamera">Stop Camera</button>
+        </div>
+        <div class="status" id="status">WebSocket: Connecting...</div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        // ---------- Configuration ----------
+        const WS_URL = 'ws://localhost:8766';        // Change if your server runs elsewhere
+        const LANDMARKS_PER_HAND = 21;               // 21 landmarks per hand
+        const COORDS_PER_LANDMARK = 3;               // x, y, z
+        const TOTAL_VALUES = LANDMARKS_PER_HAND * COORDS_PER_LANDMARK * 2; // 126
+
+        // DOM elements
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('overlay');
+        const ctx = canvasElement.getContext('2d');
+        const predictionDiv = document.getElementById('prediction');
+        const statusDiv = document.getElementById('status');
+        const toggleBtn = document.getElementById('toggleCamera');
+        const swapCheckbox = document.getElementById('swapHands');
+
+        // Global variables
+        let ws = null;
+        let camera = null;
+        let hands = null;
+        let cameraActive = true;
+        let lastSendTime = 0;
+        const SEND_INTERVAL_MS = 100; // Throttle sending to ~10 fps (adjust as needed)
+
+        // ---------- WebSocket ----------
+        function connectWebSocket() {
+            ws = new WebSocket(WS_URL);
+            ws.onopen = () => {
+                statusDiv.innerText = 'WebSocket: Connected ✅';
+                statusDiv.style.color = '#34a853';
+                // Send a test message to verify
+                ws.send(JSON.stringify({ type: 'test' }));
+            };
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'prediction') {
+                    // Update UI with predicted gesture class
+                    predictionDiv.innerText = `Prediction: ${data.result}`;
+                } else if (data.type === 'test_response') {
+                    console.log('Test response:', data.message);
+                    statusDiv.innerText += ' | Test OK';
+                } else if (data.type === 'error') {
+                    console.error('Server error:', data.message);
+                    predictionDiv.innerText = `Error: ${data.message}`;
+                    predictionDiv.style.color = '#d93025';
+                }
+            };
+            ws.onclose = () => {
+                statusDiv.innerText = 'WebSocket: Disconnected ❌';
+                statusDiv.style.color = '#d93025';
+                // Attempt to reconnect after 3 seconds
+                setTimeout(connectWebSocket, 3000);
+            };
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+                statusDiv.innerText = 'WebSocket: Error';
+            };
+        }
+
+        // ---------- MediaPipe Hands Setup ----------
+        function initMediaPipe() {
+            hands = new Hands({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                }
+            });
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            hands.onResults(onHandResults);
+        }
+
+        // Process hand landmarks from MediaPipe
+        function onHandResults(results) {
+            // Clear canvas for drawing
+            ctx.save();
+            ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            ctx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+            // Draw hand landmarks if needed (optional)
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const landmarks = results.multiHandLandmarks[i];
+                    const rawHandedness = results.multiHandedness[i].label; // "Left" or "Right"
+                    const handedness = swapCheckbox.checked ? (rawHandedness === 'Left' ? 'Right' : 'Left') : rawHandedness;
+                    drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
+                    drawLandmarks(ctx, landmarks, { color: '#FF0000', lineWidth: 1 });
+                    // Draw handedness text with background for clarity
+                    const firstLandmark = landmarks[0];
+                    const xPos = firstLandmark.x * canvasElement.width;
+                    const yPos = firstLandmark.y * canvasElement.height - 20;
+                    ctx.font = 'bold 16px Arial';
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.shadowColor = 'black';
+                    ctx.shadowBlur = 4;
+                    ctx.fillText(handedness, xPos, yPos);
+                    ctx.shadowBlur = 0;
+                }
+            }
+            ctx.restore();
+
+            // Build the landmark array for server (126 numbers)
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                // Initialize left and right arrays with zeros (63 each)
+                let leftHandData = new Array(LANDMARKS_PER_HAND * COORDS_PER_LANDMARK).fill(0);
+                let rightHandData = new Array(LANDMARKS_PER_HAND * COORDS_PER_LANDMARK).fill(0);
+
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const landmarks = results.multiHandLandmarks[i];
+                    const rawHandedness = results.multiHandedness[i].label; // "Left" or "Right"
+                    const handedness = swapCheckbox.checked ? (rawHandedness === 'Left' ? 'Right' : 'Left') : rawHandedness;
+                    // Determine target array
+                    const target = handedness === 'Left' ? leftHandData : rightHandData;
+                    // Fill coordinates: for each landmark (0..20), set x,y,z
+                    for (let j = 0; j < LANDMARKS_PER_HAND; j++) {
+                        const l = landmarks[j];
+                        const baseIdx = j * COORDS_PER_LANDMARK;
+                        target[baseIdx] = l.x;      // x
+                        target[baseIdx + 1] = l.y;  // y
+                        target[baseIdx + 2] = l.z;  // z
+                    }
+                }
+
+                // Build combined array in left/right order (left-hand first, right-hand second)
+                const combined = [...leftHandData, ...rightHandData];
+
+                // Throttle sending to avoid overwhelming WebSocket
+                const now = Date.now();
+                if (now - lastSendTime >= SEND_INTERVAL_MS && ws && ws.readyState === WebSocket.OPEN) {
+                    lastSendTime = now;
+                    ws.send(JSON.stringify({
+                        type: 'gesture',
+                        landmarks: combined
+                    }));
+                }
+            } else {
+                // No hands detected – optionally send zeros (commented out)
+                /*
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    const zeros = new Array(TOTAL_VALUES).fill(0);
+                    ws.send(JSON.stringify({ type: 'gesture', landmarks: zeros }));
+                }
+                */
+            }
+        }
+
+        // ---------- Camera Setup ----------
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                videoElement.srcObject = stream;
+                await new Promise((resolve) => {
+                    videoElement.onloadedmetadata = () => {
+                        videoElement.play();
+                        resolve();
+                    };
+                });
+                // Set canvas dimensions to match video
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+
+                // Start MediaPipe camera utils
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await hands.send({ image: videoElement });
+                    },
+                    width: 640,
+                    height: 480
+                });
+                camera.start();
+
+                toggleBtn.innerText = 'Stop Camera';
+                cameraActive = true;
+            } catch (err) {
+                console.error('Camera error:', err);
+                statusDiv.innerText = 'Camera error: ' + err.message;
+            }
+        }
+
+        function stopCamera() {
+            if (camera) {
+                camera.stop();
+            }
+            if (videoElement.srcObject) {
+                const tracks = videoElement.srcObject.getTracks();
+                tracks.forEach(track => track.stop());
+                videoElement.srcObject = null;
+            }
+            cameraActive = false;
+            toggleBtn.innerText = 'Start Camera';
+            // Clear canvas
+            ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        }
+
+        function toggleCamera() {
+            if (cameraActive) {
+                stopCamera();
+            } else {
+                initCamera();
+            }
+        }
+
+        function main() {
+            connectWebSocket();
+            initMediaPipe();
+            initCamera();
+            toggleBtn.addEventListener('click', toggleCamera);
+        }
+
+        main();
+    </script>
+</body>
+
+</html>

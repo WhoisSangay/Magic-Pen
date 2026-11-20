@@ -1,0 +1,8 @@
+{
+  "name": "Magic Pen",
+  "description": "An advanced hand-gesture controlled digital canvas with dual-hand tracking and collapsible UI.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}
